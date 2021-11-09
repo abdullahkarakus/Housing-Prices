@@ -1,0 +1,618 @@
+---
+title: "Predicting Residential Home Prices"
+output:
+  pdf_document: default
+  html_notebook: default
+author: "Abdullah Karakus"
+---
+
+```{r, include=FALSE, warning=FALSE}
+#For select function.
+library(dplyr)
+library(glmnet)
+library(leaps)
+library(randomForest)
+library(caTools)
+library(gbm)
+```
+
+# 1.Introduction
+
+Kaggle provides a comprehensive data set about the prices of residential homes in Ames, Iowa. The data set contains information about 1460 homes in 79 variables.Our aim is to create a model using this data set to predict home prices.
+
+# 2.Data Cleaning
+
+Kaggle provides ane data set for training and one data set for testing, however, the test data set doesn't contain the price information. We first combine these two data sets and perform data cleaing.
+
+```{r, include=FALSE}
+training_data = read.csv('train.csv')
+test_data = read.csv('test.csv')
+
+test_data[,'SalePrice'] <- 0
+
+housing_prices <- rbind(training_data,test_data)
+  
+nrow(training_data)
+nrow(test_data)
+nrow(housing_prices)
+length(housing_prices)
+
+head(housing_prices)
+```
+
+The variables Alley[the type of alley the house has], BsmtQual[the quality of the basement], FireplaceQu[fire place quality], GarageQual[garage quality], PoolQC[pool quality] contain too many NA-values ranging from 80 to 2700. However, this is due to the fact that some houses don't have fireplaces or pools. So we change these variables appropriately first.
+
+
+```{r, include=FALSE}
+for (name in names(housing_prices)) {
+  num = sum(is.na(housing_prices[,name]))
+  print(name)
+  print(num)
+}
+```
+
+The LotFrontage[Linear Feet of street connected to property] variable contains 486 NA-values. It's correlation with the Price variable is 0.35 so we drop this variable.
+
+```{r,echo=FALSE}
+cor(housing_prices$SalePrice[1:1460],housing_prices$LotFrontage[1:1460], use = "complete.obs")
+```
+
+```{r, include=FALSE}
+#Change the NA values in LotFrontage with the medians in each Neighborhood.
+housing_prices <- select(housing_prices, -LotFrontage)
+# Na := No alley access.
+housing_prices$Alley[is.na(housing_prices$Alley)] <- "Na"
+# Nb := No basement.
+basement = is.na(housing_prices$BsmtQual)
+housing_prices$BsmtQual[basement] <- "Nb"
+housing_prices$BsmtCond[basement] <- "Nb"
+housing_prices$BsmtExposure[basement] <- "Nb"
+housing_prices$BsmtFinType1[basement] <- "Nb"
+housing_prices$BsmtFinType2[basement] <- "Nb"
+#Nfp := No fireplace
+housing_prices$FireplaceQu[is.na(housing_prices$FireplaceQu)] <- "Nfp"
+#Ng := No garage
+garage = is.na(housing_prices$GarageType)
+housing_prices$GarageType[garage] <- "Ng"
+housing_prices$GarageYrBlt[garage] <- 0
+housing_prices$GarageFinish[garage] <- "Ng"
+housing_prices$GarageCars[garage] <- 0
+housing_prices$GarageArea[garage] <- 0
+housing_prices$GarageQual[garage] <- "Ng"
+housing_prices$GarageCond[garage] <- "Ng"
+#Np := No pool
+housing_prices$PoolQC[is.na(housing_prices$PoolQC)] <- "Np"
+#Nf := No fence
+housing_prices$Fence[is.na(housing_prices$Fence)] <- "Nf"
+#MSSubclass is a qualitative variable.
+housing_prices$MSSubClass <- as.character(housing_prices$MSSubClass)
+```
+
+
+```{r,include=FALSE}
+for (name in names(housing_prices)) {
+  num = sum(is.na(housing_prices[,name]))
+  print(name)
+  print(num)
+}
+```
+
+MSZoning[Identifies the general zoning classification of the sale, e.g. Residential, Industrial] variable has 4 missing values. We fill these values with the most frequent observation corresponding to the neighborhood the house is in. 
+
+```{r,include=FALSE}
+#There are 4 NA values in MSZoning.
+housing_prices$Neighborhood[is.na(housing_prices$MSZoning)]
+```
+
+```{r, include=FALSE}
+table(housing_prices$MSZoning[housing_prices$Neighborhood == 'IDOTRR'])
+table(housing_prices$MSZoning[housing_prices$Neighborhood == 'Mitchel'])
+```
+
+
+```{r, include=FALSE}
+for (i in 1:2) {
+  groups = c("IDOTRR","Mitchel")
+  var = c("RM","RL")
+  group = (housing_prices$Neighborhood == groups[i])
+  housing_prices$MSZoning[is.na(housing_prices$MSZoning) & group] = var[i]
+}
+```
+
+Utilities variable which contains 2 missing values, is about the type of utilities available in a house. It is a constant variable. Every house has all the utilities like gas, electricity and water so we discard this variable.
+
+```{r, echo=FALSE}
+table(housing_prices$Utilities)
+```
+
+```{r,include=FALSE}
+housing_prices <- select(housing_prices, -Utilities)
+```
+
+Exterior1st[Exterior covering on house] and Exterior2[if there is a second one] have 1 missing value on the same row. We fill them both with the most occuring observation in the Exterior1st variable.
+
+```{r, include=FALSE}
+table(housing_prices$Exterior1st)
+```
+
+```{r,include=FALSE}
+housing_prices[is.na(housing_prices$Exterior1st),c('Exterior1st','Exterior2nd')] = "VinylSd"
+```
+
+MasVnrType[Masonry Veneer type] has 24 missing values. We assign the most common type in each Neighborhood. It has some relation with the Price variable.
+
+```{r,echo = FALSE}
+boxplot(housing_prices$SalePrice[1:1460]~housing_prices$MasVnrType[1:1460], xlab = "Masonry Veneer Type", ylab = "Price" )
+```
+
+```{r,include=FALSE}
+for (name in unique(housing_prices$Neighborhood)) {
+  group = (housing_prices$Neighborhood == name)
+  t = sort(table(housing_prices[group,'MasVnrType']), decreasing = TRUE)
+  var = t[1]
+  housing_prices[group & is.na(housing_prices$MasVnrType), 'MasVnrType'] = var
+}
+```
+
+MasVnrArea[Masonry Veneer area] has 23 missing values. It has correlation of 0.47 so we exclude this variable.
+
+```{r,echo=FALSE}
+cor(housing_prices$SalePrice[1:1460],housing_prices$MasVnrArea[1:1460], use="complete.obs")
+```
+
+```{r,include=FALSE}
+housing_prices <- select(housing_prices, -MasVnrArea)
+```
+
+BsmtCond[general condition of the basement] and BsmtExposure[walk out or garden level] has 1 missing value so we fill them with the most common observation.
+
+```{r, echo=FALSE}
+print("BsmtCond")
+table(housing_prices$BsmtCond)
+print("BsmtExposure")
+table(housing_prices$BsmtExposure)
+```
+
+```{r,include=FALSE}
+housing_prices$BsmtCond[is.na(housing_prices$BsmtCond)] = "TA"
+housing_prices$BsmtExposure[is.na(housing_prices$BsmtExposure)] = "No"
+```
+
+BsmtFinSF1[Type 1 finished square ft] has 1 missing value.
+
+```{r,echo=FALSE}
+housing_prices[is.na(housing_prices$BsmtFinSF1),c("BsmtQual","BsmtFinSF1")]
+```
+
+It corresponds to a house with no basement so we can safely insert 0.
+
+```{r,include=FALSE}
+na = (is.na(housing_prices$BsmtFinSF1))
+housing_prices$BsmtFinSF1[na] <- 0
+housing_prices$BsmtFinSF2[na] <- 0 
+housing_prices$BsmtUnfSF[na] <- 0
+housing_prices$TotalBsmtSF[na] <- 0
+housing_prices$BsmtFullBath[na] <- 0
+housing_prices$BsmtFullBath[na] <- 0
+housing_prices$BsmtHalfBath[na] <- 0
+```
+
+```{r,include=FALSE}
+housing_prices[is.na(housing_prices$BsmtFullBath),]
+```
+
+```{r,include=FALSE}
+na = (is.na(housing_prices$BsmtFullBath))
+housing_prices$BsmtFullBath[na] <- 0
+housing_prices$BsmtHalfBath[na] <- 0
+```
+
+```{r,include=FALSE}
+housing_prices[is.na(housing_prices$BsmtFinType2),]
+```
+
+```{r,include=FALSE}
+housing_prices$BsmtFinType2[is.na(housing_prices$BsmtFinType2)] <- "GLQ"
+```
+
+```{r,include=FALSE}
+table(housing_prices$KitchenQual)
+table(housing_prices$Functional)
+```
+
+```{r,include=FALSE}
+housing_prices$KitchenQual[is.na(housing_prices$KitchenQual)] <- "TA"
+housing_prices$Functional[is.na(housing_prices$Functional)] <- "Typ"
+```
+
+GarageYrBlt[The year Garage is built], GarageFinish, GarageCars[how many cars can the garage accomodate], GarageArea[area in square ft], GarageQual[Garage Quality] and GarageCond[the current condition of the garage], GarageFinish[whether the garage is already built]  have missing values.
+
+For the GarageYrBlt we plug in the same year as the house is built.
+
+```{r, echo=FALSE}
+housing_prices[is.na(housing_prices$GarageYrBlt),c("YearBuilt","YearRemodAdd","GarageYrBlt","GarageFinish","GarageCars","GarageArea","GarageQual","GarageCond")]
+```
+Since the both houses are built before 1925, it is reasonable to assume that garage quality is poor based on the following plot.
+
+```{r,echo=FALSE}
+boxplot(housing_prices$GarageYrBlt[!(housing_prices$GarageQual == "Ng")] ~ housing_prices$GarageQual[!(housing_prices$GarageQual == "Ng")], xlab = "Garage Quality", ylab = "Year Built")
+```
+For the GarageCond we look at the remodeling date. Both houses are remodeled around 1990 so we assign "TA"-typical value for this variable.
+
+```{r,echo=FALSE}
+boxplot(housing_prices$YearRemodAdd[!(housing_prices$GarageQual == "Ng")] ~housing_prices$GarageCond[!(housing_prices$GarageQual == "Ng")], xlab = "Garage Quality", ylab = "Year Remodeled")
+```
+For GarageFinish we assign the value "Fin". For GarageArea we assign the median value for that variable.
+
+```{r,include=FALSE}
+housing_prices$GarageYrBlt[is.na(housing_prices$GarageYrBlt)] <- housing_prices$YearBuilt[is.na(housing_prices$GarageYrBlt)]
+
+housing_prices$GarageFinish[is.na(housing_prices$GarageFinish)] <- "Fin"
+
+housing_prices$GarageQual[is.na(housing_prices$GarageQual)] <- "Po"
+
+housing_prices$GarageCond[is.na(housing_prices$GarageCond)] <- "TA"
+
+housing_prices$GarageArea[is.na(housing_prices$GarageArea)] <- median(housing_prices$GarageArea, na.rm = TRUE)
+
+```
+
+```{r,include=FALSE}
+housing_prices[is.na(housing_prices$GarageCars),]
+```
+
+The following boxplot suggest we should assign the value 1 for GarageCars. However it also suggest GarageCars and GarageArea are highly correlated so maybe we will discard one of them.
+
+```{r,echo=FALSE}
+boxplot(housing_prices$GarageArea ~ housing_prices$GarageCars, xlab = "Garage Cars", ylab = "Garage Area")
+```
+
+```{r,include=FALSE}
+housing_prices$GarageCars[is.na(housing_prices$GarageCars)] <- 1 
+```
+
+The variable MiscFeature contains miscellaneous feature not covered in other categories such as second garage. Non means there is no additional feature and the following boxplot suggest this variable is not very meaningful. So, it is dropped along with MiscVal variable.
+
+```{r,echo=FALSE}
+housing_prices$MiscFeature[is.na(housing_prices$MiscFeature)] <- "Non"
+boxplot(housing_prices$SalePrice[1:1460]~housing_prices$MiscFeature[1:1460], xlab = "Misc Value", ylab = "Price")
+```
+
+
+```{r,include=FALSE}
+housing_prices <- select(housing_prices, -MiscFeature, -MiscVal)
+```
+
+
+```{r,include=FALSE}
+housing_prices$SaleType[is.na(housing_prices$SaleType)] <-  sort(table(housing_prices$SaleType), decreasing = TRUE)[1]
+
+housing_prices$Electrical[is.na(housing_prices$Electrical)] <-  sort(table(housing_prices$Electrical), decreasing = TRUE)[1]
+
+```
+
+
+
+```{r,include=FALSE}
+for (name in names(housing_prices)) {
+  num = sum(is.na(housing_prices[,name]))
+  print(name)
+  print(num)
+}
+```
+
+If we look at the variables Condition1[proximity to various conditions] and Condition2[if there is a second one] we see that in 2524 rows they have the same value. 2511 of those are "Norm" and 13 of them are other values. Norm stands for Normal meaning that the house is not in close proximity to any place important. We also see that if the Condition1 is Norm then Condition2 is also Norm. This leads us to conclude that if Condition1 and Condition2 has the same value and Condition1 is not Norm then Condition2 should be Norm. This is probably a mistake in the data set so we correct it accordingly.
+
+```{r,echo=FALSE}
+print("The values in Condition1 and 2 when they have the same value")
+C12 = (housing_prices$Condition1 == housing_prices$Condition2)
+sum(C12)
+for(name in unique(housing_prices$Condition1)) {
+  group = (housing_prices$Condition1 == name)
+  num = C12[group]
+  print(name)
+  print(sum(num))
+}
+```
+
+```{r,include=FALSE}
+nm = (housing_prices$Condition1 == "Norm")
+nm2 = (housing_prices$Condition2[nm] == "Norm")
+mean(nm2)
+```
+
+```{r,include =FALSE}
+for(name in unique(housing_prices$Condition1)) {
+  group = (housing_prices$Condition1 == name)
+  housing_prices[group & C12, "Condition2"] = "Norm"
+}
+```
+
+```{r,include=FALSE}
+C12 = (housing_prices$Condition1 == housing_prices$Condition2)
+sum(C12)
+for(name in unique(housing_prices$Condition1)) {
+  group = (housing_prices$Condition1 == name)
+  num = C12[group]
+  print(name)
+  print(sum(num))
+}
+```
+
+The variable SaleType contains the value 2525 which is not an actual value, it is a typo.
+
+```{r,echo=FALSE}
+table(housing_prices$SaleType)
+```
+
+So, we change it with the most frequent value.
+
+```{r,include=FALSE}
+housing_prices$SaleType[(housing_prices$SaleType == "2525")] <- "VWD"
+```
+
+
+```{r,include=FALSE}
+e12 <- (housing_prices$Exterior1st != housing_prices$Exterior2nd)
+mean(e12)
+head(housing_prices[e12, c("Exterior1st","Exterior2nd")])
+```
+
+Exterior1st and Exterior2nd columns are supposed to have the CemntBd, cement board, variable. It is written as CmentBd in Exterior2nd column so we correct this typo.
+
+```{r,echo=FALSE}
+cmnt <- (housing_prices$Exterior2nd == "CmentBd")
+head(housing_prices[cmnt, c("Exterior1st", "Exterior2nd")])
+```
+
+```{r,include=FALSE}
+housing_prices$Exterior2nd[cmnt] <- "CemntBd"
+```
+
+Exterior1st and Exterior2nd variables are supposed have two values Wd Sdng, wood siding, and WdShing, wood shingles. However, Exterior2nd variable instead has the value Wd Shng variable which is a typo, and it can go either way. So we look at the Exterior1st variable and whichever value it has we assign it to Exterior2nd.
+
+```{r,echo=FALSE}
+wd <- (housing_prices$Exterior2nd == "Wd Shng")
+head(housing_prices[wd,c("Exterior1st", "Exterior2nd")])
+```
+The Wd Shng typo persists in the Exteriror2nd column.
+
+```{r,echo=FALSE}
+shing <- (housing_prices$Exterior1st != "WdShing")
+siding <- (housing_prices$Exterior1st != "Wd Sdng")
+housing_prices[shing & siding & wd, c("Exterior1st", "Exterior2nd")]
+#mean(!shing)
+#mean(!siding)
+```
+
+This time we have no way of knowing how to correct it so we just assign the value Wd Sdng, since it appears 10 times more than WdShing.
+
+```{r,include=FALSE}
+housing_prices$Exterior2nd[wd & (!shing)] <- "WdShing"
+housing_prices$Exterior2nd[wd & (!siding)] <- "Wd Sdng"
+housing_prices$Exterior2nd[wd & siding & shing] <- "Wd Sdng"
+```
+
+```{r,include=FALSE}
+unique(housing_prices$Exterior1st)
+unique(housing_prices$Exterior2nd)
+```
+
+```{r,include=FALSE}
+table(housing_prices$Exterior1st)
+table(housing_prices$Exterior2nd)
+```
+
+```{r,include=FALSE}
+oth <- (housing_prices$Exterior2nd == "Other")
+housing_prices$Exterior2nd[oth] <- housing_prices$Exterior1st[oth]
+```
+
+```{r,include=FALSE}
+wd = (housing_prices$Exterior1st == housing_prices$Exterior2nd)
+boxplot(housing_prices$SalePrice[1:1460] ~ wd[1:1460])
+```
+
+```{r,include=FALSE}
+table(housing_prices$Exterior1st)
+table(housing_prices$Exterior2nd)
+```
+
+```{r,include=FALSE}
+hp_2 <- housing_prices
+
+for(name in names(housing_prices)) {
+  if (typeof(housing_prices[,name]) == "character"){
+    housing_prices[,name] <- as.factor(housing_prices[,name])
+  }
+}
+```
+
+The MoSold variable contains numbers from 1 to 12 denoting the month the house is sold in. It is given as an integer variable however on month shouldn't be considered as better than another month. So we change it into a factor.
+
+```{r,include=FALSE}
+housing_prices$MoSold <- as.factor(housing_prices$MoSold)
+```
+
+```{r, include=FALSE}
+housing_prices$Alley <- relevel(housing_prices$Alley, "Na")
+housing_prices$Condition1 <- relevel(housing_prices$Condition1, "Norm")
+housing_prices$Condition2 <- relevel(housing_prices$Condition2, "Norm")
+housing_prices$MasVnrType <- relevel(housing_prices$MasVnrType, "None")
+housing_prices$ExterQual <- relevel(housing_prices$ExterQual, "Fa")
+housing_prices$ExterCond <- relevel(housing_prices$ExterCond, "Po")
+housing_prices$BsmtQual <- relevel(housing_prices$BsmtQual, "Nb")
+housing_prices$BsmtCond <- relevel(housing_prices$BsmtCond, "Nb")
+housing_prices$BsmtExposure <- relevel(housing_prices$BsmtExposure, "Nb")
+housing_prices$BsmtFinType1 <- relevel(housing_prices$BsmtFinType1, "Nb")
+housing_prices$BsmtFinType2 <- relevel(housing_prices$BsmtFinType2, "Nb")
+housing_prices$HeatingQC <- relevel(housing_prices$HeatingQC, "Po")
+housing_prices$KitchenQual <- relevel(housing_prices$KitchenQual, "Fa")
+housing_prices$Functional <- relevel(housing_prices$Functional, "Typ")
+housing_prices$FireplaceQu <- relevel(housing_prices$FireplaceQu, "Nfp")
+housing_prices$GarageType <- relevel(housing_prices$GarageType, "Ng")
+housing_prices$GarageFinish <- relevel(housing_prices$GarageFinish, "Ng")
+housing_prices$GarageQual <- relevel(housing_prices$GarageQual, "Ng")
+housing_prices$GarageCond <- relevel(housing_prices$GarageCond, "Ng")
+housing_prices$PoolQC <- relevel(housing_prices$PoolQC, "Np")
+housing_prices$Fence <- relevel(housing_prices$Fence, "Nf")
+housing_prices$SaleType <- relevel(housing_prices$SaleType, "Oth")
+housing_prices$SaleCondition <-relevel(housing_prices$SaleCondition, "Partial")
+```
+
+The response variable has too many outliers:
+
+```{r,echo=FALSE}
+boxplot(housing_prices$SalePrice[1:1460])
+```
+Log transforming it gives makes it better:
+
+```{r,echo=FALSE}
+housing_prices$SalePrice[1:1460] <- log(housing_prices$SalePrice[1:1460])
+boxplot(housing_prices$SalePrice[1:1460])
+```
+
+# 3.Lasso and Random Forest
+We first run Lasso.
+
+```{r,include=FALSE}
+y.train1 <- housing_prices$SalePrice[1:1460]
+matrix_model_1 <- model.matrix(SalePrice ~. -Id, housing_prices)[,-1]
+
+matrix.train1 <- matrix_model_1[1:1460,]
+matrix.test1 <- matrix_model_1[1461:2919,]
+
+lasso.mod1 <- glmnet(matrix.train1, y.train1, alpha = 1)
+
+set.seed(1)
+cv.lasso <- cv.glmnet(matrix.train1, y.train1, alpha = 1)
+best_lambda1 <- cv.lasso$lambda.min
+
+lasso.pred1 <- predict(lasso.mod1, s = best_lambda1, newx <- matrix.test1)
+```
+
+```{r,include=FALSE}
+best_lambda1
+
+lasso.coef1 <- predict(lasso.mod1, s = best_lambda1, type = "coefficients")
+lasso.coef1
+```
+
+```{r,include = FALSE}
+result1 <- cbind((1461:2919),exp(lasso.pred1))
+result1 <- as.data.frame(result1)
+names(result1)
+
+names(result1)[1] <- "Id"
+names(result1)[2] <- "SalePrice"
+
+head(result1)
+
+write.csv(result1, "Result1.csv", row.names = FALSE)
+
+#Error rate = 0.13057, 0.13040 leaderboard = 1433, 1438
+```
+
+Lasso gives 104 non-zero and 180 zero coefficients. The error rate is 0.13040. The non-zero terms are the following:
+
+
+```{r,echo=FALSE}
+for(i in summary(lasso.coef1)[1]){
+  print(colnames(matrix.train1)[i-1])
+}
+```
+
+
+We will also fit random forest. We use 1000 trees and 17 splits. The percentage of variance explained is 88.49.
+
+```{r,include=FALSE}
+set.seed(1)
+rf <- randomForest(SalePrice ~. -Id, data = housing_prices[1:1460,], mtry = 17, ntree = 1000, importance = TRUE)
+```
+
+```{r,include=FALSE}
+rf
+```
+
+The error rate is 0.14311, so it is not an improvement over LASSO.
+
+The important variables are: GrLivArea[Living area above ground], Neighborhood, X1stFlrSF[First floor square feet], TotalBsmtSF[total square ft area of basement], MSSubClass[type of dwelling], OverallQual, GarageArea.
+
+```{r,echo=FALSE,fig.width=10,fig.height=10}
+varImpPlot(rf)
+```
+
+
+```{r,include=FALSE}
+pred.rf <- predict(rf, newdata = housing_prices[1461:2919,])
+
+result1.rf <- cbind((1461:2919),exp(pred.rf))
+result1.rf <- as.data.frame(result1.rf)
+
+names(result1.rf)[1] <- "Id"
+names(result1.rf)[2] <- "SalePrice"
+
+write.csv(result1.rf, "Result1_rf.csv", row.names = FALSE)
+
+#error rate = 0.14311
+```
+
+# Addendum
+
+Following suggestions after the presentation we also try boosting with 1000 trees. The following plot shows the test mse for boosting using several different shrinkage values.
+
+```{r,include = FALSE}
+housing <- housing_prices[1:1460,]
+housing_predict <- housing_prices[1461:2919,]
+
+set.seed(1)
+train <- sample.split(housing$SalePrice, SplitRatio = 0.8)
+
+grid <- seq(from = 0, to = 1, length = 100)
+test_MSE <- rep(0,100)
+
+housing_train <- housing[train,]
+housing_test <- housing[!train,]
+
+for (i in 1:100){
+  set.seed(1)
+  boost.housing <- gbm(SalePrice ~. -Id, data = housing_train, distribution = "gaussian", n.trees = 1000, shrinkage = grid[i])
+  boost.pred <- predict(boost.housing, newdata = housing_test, n.trees = 1000)
+  test_MSE[i] <- mean((boost.pred - housing_test$SalePrice)^2)
+}
+```
+
+
+```{r,echo = FALSE}
+plot(grid,test_MSE, xlab = "Shrinkage", ylab = "Test MSE")
+```
+The minimum is achived for a shrinkage value of 0.016. The error rate in this case is 0.13327 which is better than random forest but worse than LASSO.
+
+```{r,include = FALSE}
+test_MSE[which.min(test_MSE)]
+```
+
+The following table shows the most important 5 variables.
+
+```{r,echo = FALSE}
+housing_prices.boosting <- gbm(SalePrice ~. -Id, data = housing_prices[1:1460,], distribution = 'gaussian', n.trees = 1000, shrinkage = 0.016)
+
+head(summary(housing_prices.boosting,plot = FALSE))
+```
+
+
+```{r,include=FALSE}
+pred.boosting <- predict(housing_prices.boosting, newdata = housing_prices[1461:2919,], n.tree = 1000)
+
+result.boost <- cbind((1461:2919),exp(pred.boosting))
+result.boost <- as.data.frame(result.boost)
+
+names(result.boost)[1] <- "Id"
+names(result.boost)[2] <- "SalePrice"
+
+write.csv(result.boost, "Result_boost.csv", row.names = FALSE)
+
+#error rate = 0.13327
+```
+
+
